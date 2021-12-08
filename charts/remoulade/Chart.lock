@@ -1,0 +1,15 @@
+dependencies:
+- name: postgresql
+  repository: https://wiremind.github.io/wiremind-helm-charts
+  version: 8.7.0
+- name: redis
+  repository: https://charts.bitnami.com/bitnami
+  version: 15.6.3
+- name: rabbitmq
+  repository: https://charts.bitnami.com/bitnami
+  version: 8.24.10
+- name: prometheus-rabbitmq-exporter
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 1.0.0
+digest: sha256:f84fa08efbf43572a468382d004b7c242eb5820a2d33ece9e309ba8a5c3b6061
+generated: "2021-12-08T22:11:16.219434+01:00"

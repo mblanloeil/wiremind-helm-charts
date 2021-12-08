@@ -1,0 +1,200 @@
+{{- if .Values.consumers.enabled }}
+
+{{- $consumerDefault := .Values.consumers.defaults }}
+{{- range $consumerType, $consumerValue := .Values.consumers.list }}
+{{- range $key, $currentWorker := $consumerValue }}
+
+{{- $currentWorkerFullName := printf "%s-%s" $.Release.Name $consumerType }}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $currentWorkerFullName }}
+  labels:
+    {{- include "remoulade.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+    chartreuse: enabled
+spec:
+  replicas: {{ $currentWorker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "remoulade.matchLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+  minReadySeconds: 5
+  strategy:
+    type: {{ default $consumerDefault.strategyType $currentWorker.strategyType }}
+  revisionHistoryLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "remoulade.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+        {{- include "remoulade.networkPolicyLabels" $ | nindent 8 }}
+      annotations:
+        # https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-types-of-pods-can-prevent-ca-from-removing-a-node
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+        checksum/config: {{ include (print $.Template.BasePath "/configuration-secret.yaml") $ | sha256sum }}
+        {{- $currentWorker.podAnnotations | default $consumerDefault.podAnnotations | toYaml | nindent 8 }}
+    spec:
+      priorityClassName: {{ default $consumerDefault.priorityClassName $currentWorker.priorityClassName }}
+      imagePullSecrets:
+        - name: gitlab-docker-registry
+      serviceAccountName: {{ template "remoulade.serviceAccountName" $ }}
+      terminationGracePeriodSeconds: {{ $currentWorker.terminationGracePeriodSeconds | default $consumerDefault.terminationGracePeriodSeconds }}
+      containers:
+        - name: remoulade-consumer-{{ $consumerType }}
+          {{- if $consumerDefault.image.tag }}
+          image: "{{ $.Values.image.repository }}:{{ $consumerDefault.image.tag }}"
+          {{- else }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          {{- end }}
+          command:
+            - {{ default $consumerDefault.command $currentWorker.command }}
+          args:
+            {{- toYaml $currentWorker.args | nindent 12 }}
+          {{- if not $currentWorker.disableMetrics }}
+          ports:
+            - name: metrics
+              containerPort: 9191
+              protocol: TCP
+          {{- end }}
+          pullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            {{- range $key, $val := $.Values.additionalEnvironmentVariables }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+          resources:
+            {{- if $currentWorker.resources }}
+              {{- toYaml $currentWorker.resources | nindent 12 }}
+            {{- else }}
+              {{- toYaml $consumerDefault.resources | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: remoulade-configfile
+              mountPath: "/app/remoulade.yaml"
+              subPath: remoulade.yaml
+          securityContext:
+            allowPrivilegeEscalation: false
+      nodeSelector:
+        {{- if $currentWorker.nodeSelector }}
+          {{- toYaml $currentWorker.nodeSelector | nindent 8 }}
+        {{- else }}
+          {{- toYaml $consumerDefault.nodeSelector | nindent 8 }}
+        {{- end }}
+      affinity:
+        {{- if $currentWorker.affinity }}
+          {{- toYaml $currentWorker.affinity | nindent 8 }}
+        {{- else }}
+          {{- toYaml $consumerDefault.affinity | nindent 8 }}
+        {{- end }}
+      {{- with $currentWorker.tolerations | default $consumerDefault.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: remoulade-configfile
+          secret:
+            {{- if $currentWorker.usePrivilegedremouladeConf}}
+            secretName: {{ template "remoulade.fullname" $ }}-privileged
+            {{- else }}
+            secretName: {{ template "remoulade.fullname" $ }}
+            {{- end }}
+---
+
+apiVersion: "remoulade.io/v1"
+kind: ExpectedDeploymentScale
+metadata:
+  name: {{ $currentWorkerFullName }}
+  labels:
+    {{- include "remoulade.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+spec:
+  deploymentName: {{ $currentWorkerFullName }}
+  expectedScale: {{ $currentWorker.replicaCount }}
+  priority: {{ $currentWorker.expectedDeploymentScalePriority | default $consumerDefault.expectedDeploymentScalePriority }}
+
+{{- if $currentWorker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $currentWorkerFullName }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $currentWorkerFullName }}
+  minReplicas: {{ $currentWorker.autoscaling.minReplicas }}
+  maxReplicas: {{ $currentWorker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Object
+      object:
+        metric:
+          name: {{ $currentWorker.autoscaling.metricName }}
+          {{- with $currentWorker.autoscaling.metricMatchLabels }}
+          selector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+        describedObject:
+          apiVersion: "/v1"
+          kind: Service
+          # Defaults to HPA based on rabbitmq metrics
+          name: {{ $currentWorker.autoscaling.describedService | default (printf "%s-prometheus-rabbitmq-exporter" $.Release.Name) }}
+        target:
+          type: Value
+          value: {{ $currentWorker.autoscaling.targetMetricValue }}
+
+{{- end }}
+
+{{- if not $currentWorker.disableMetrics }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $currentWorkerFullName }}-metrics
+  labels:
+    {{- include "remoulade.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9191
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "remoulade.matchLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+
+---
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $currentWorkerFullName }}-metrics
+  labels:
+    {{- include "remoulade.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "remoulade.matchLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: remoulade-consumer-{{ $consumerType }}
+  endpoints:
+    - port: metrics
+      # Drop OpenMetrics .*_created metrics as we get a lot of them with HPA * a lot of metrics per Pod
+      metricRelabelings:
+        - action: drop
+          regex: ".*_created"
+          sourceLabels:
+            - __name__
+
+{{- end }}
+
+---
+
+{{- end }}
+{{- end }}
+{{- end }}
